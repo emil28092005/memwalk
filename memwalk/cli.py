@@ -77,6 +77,11 @@ def digest(
     cfg = load_config()
     source = Path(path).expanduser().resolve()
 
+    if n_ctx is None:
+        from .gpu import auto_n_ctx
+        chosen = auto_n_ctx()
+        console.print(f"[dim]Adaptive n_ctx = {chosen:,}[/dim]")
+
     if split:
         with console.status(f"Discovering subdirectories in {source}…"):
             results = engine_digest_subdirs(cfg, source, n_ctx=n_ctx,

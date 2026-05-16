@@ -12,6 +12,7 @@ from memba import Session
 
 from . import cache, corpus
 from .config import Config
+from .gpu import auto_n_ctx
 
 # Prompt that frames the ingest call so the assistant turn stored in state
 # is *substantive* (not "noted") — avoids the contextual inertia bug we
@@ -64,7 +65,7 @@ def digest(
     if not source_path.exists() or not source_path.is_dir():
         raise NotADirectoryError(source_path)
 
-    n_ctx = n_ctx or cfg.n_ctx
+    n_ctx = auto_n_ctx(n_ctx if n_ctx else None)
     files = corpus.collect_files(source_path)
     if not files:
         raise RuntimeError(f"No source files found under {source_path}")
