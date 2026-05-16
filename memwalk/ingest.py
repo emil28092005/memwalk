@@ -74,13 +74,14 @@ def update(cfg: Config, *, verbose: bool = False) -> dict:
     sess = open_session(cfg, verbose=verbose)
 
     prompt = (
-        "I will now feed you a summary of my recent work activity. "
-        "Read it and incorporate into your understanding of what I've been "
-        "doing. Reply with just 'noted'.\n\n" + block
+        "Below is a record of my recent work activity. Read it carefully, "
+        "then in two short sentences describe (a) the dominant theme of "
+        "this period and (b) one or two standout projects. I will ask "
+        "specific follow-up questions in later turns.\n\n" + block
     )
 
     t0 = time.time()
-    ack = sess.chat(prompt, max_tokens=20)
+    ack = sess.chat(prompt, max_tokens=120)
     elapsed = time.time() - t0
 
     sess.save()
@@ -101,8 +102,17 @@ def update(cfg: Config, *, verbose: bool = False) -> dict:
 
 def query(cfg: Config, question: str, max_tokens: int = 400,
           verbose: bool = False) -> str:
-    """Load the current state and ask a question."""
+    """Load the current state and ask a question.
+
+    The question is wrapped in a short framing prefix so the model
+    switches out of any acknowledgement pattern carried by prior ingest
+    turns and actually answers from the activity it absorbed.
+    """
     if not cfg.state_path.exists():
         raise FileNotFoundError("No state yet — run `memwalk update` first.")
     sess = open_session(cfg, verbose=verbose)
-    return sess.chat(question, max_tokens=max_tokens)
+    framed = (
+        "Drawing on the work activity I shared with you earlier, please "
+        f"answer this clearly and concretely:\n\n{question}"
+    )
+    return sess.chat(framed, max_tokens=max_tokens)
