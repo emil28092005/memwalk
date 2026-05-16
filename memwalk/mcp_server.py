@@ -40,10 +40,11 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Read all source files under the given directory and build a "
                 "cached SSM state that can be queried in subsequent ask() calls. "
-                "Slow first time (5-30s for medium repos, longer for big ones); "
+                "Use this for small-to-medium repos that fit in a single context "
+                "window (default ~120K chars). For large repos that exceed the "
+                "context limit, use digest_split instead. Slow first time (5-30s); "
                 "cache is reused on subsequent calls until source files change. "
-                "Use before ask() to control when ingestion happens, or just call "
-                "ask() directly which will auto-digest as needed."
+                "You can also call ask() directly which auto-digests as needed."
             ),
             inputSchema={
                 "type": "object",
@@ -68,13 +69,15 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="ask",
             description=(
-                "Query a codebase using its cached SSM state. Returns the "
-                "model's answer based on the previously digested source. "
-                "Auto-digests if no fresh cache exists (first call may be "
-                "slow). Subsequent calls on the same codebase are fast "
-                "(<1s typical). Best for descriptive questions: 'what does "
-                "module X do', 'where is concept Y used', 'list all CLI "
-                "commands', 'how would I add feature Z'."
+                "Step 3 in the multi-corpus workflow. Query a codebase using its "
+                "cached SSM state. Returns the model's answer based on the previously "
+                "digested source. For large repos that were split-digested, you must "
+                "pass the specific subdirectory path in 'path' that is most relevant "
+                "to the question — not the repo root. For example: "
+                "ask('/repo/src/auth', 'how does login work?') or "
+                "ask('/repo/backend/db', 'what migrations exist?'). "
+                "Auto-digests if no fresh cache exists (first call may be slow). "
+                "Subsequent calls on the same codebase are fast (<1s typical)."
             ),
             inputSchema={
                 "type": "object",
@@ -117,16 +120,19 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="list_subdirs",
             description=(
-                "List subdirectories of a codebase root with file counts, "
-                "estimated char sizes, depth, and cache status. Use this before "
-                "digest_split to see which subdirectories are available. "
-                "Cheap — does not load the model."
+                "Step 1 in the multi-corpus workflow. Lists subdirectories of a "
+                "codebase root with file counts, estimated char sizes, recursion "
+                "depth, and cache status. For large repos, this shows you what leaf "
+                "directories are available so you can pick the right ones to digest. "
+                "Directories that are too large for the current n_ctx budget are "
+                "shown with their depth; you can use max_depth to control how deep "
+                "the recursion goes. Cheap — does not load the model."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Codebase root to inspect."},
-                    "max_depth": {"type": "integer", "description": "Max recursion depth (default: unlimited)."},
+                    "max_depth": {"type": "integer", "description": "Max recursion depth (default: unlimited). Use 1 for immediate children only."},
                 },
                 "required": ["path"],
             },
@@ -134,19 +140,23 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="digest_split",
             description=(
-                "Discover subdirectories under the given path and digest each "
-                "independently into its own cached SSM state. Each subdirectory gets "
-                "a separate cache, so subsequent ask() calls can target specific "
-                "sub-caches. Use list_subdirs first to see what will be digested. "
-                "Slow first time; cache is reused on subsequent calls."
+                "Step 2 in the multi-corpus workflow. Discovers subdirectories under "
+                "the given path and digests each independently into its own cached "
+                "SSM state. Each subdirectory gets a separate cache keyed by its "
+                "absolute path, so subsequent ask() calls can target specific "
+                "sub-caches (e.g. ask '/repo/src/auth' 'how does login work?'). "
+                "Use list_subdirs first to see what will be digested. Slow first "
+                "time (5-30s per subdirectory); cache is reused on subsequent calls. "
+                "Large subdirectories that exceed the n_ctx budget are skipped with "
+                "an error unless you increase max_depth to split them further."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Codebase root to split-digest."},
                     "force": {"type": "boolean", "description": "Re-ingest even if cache is fresh.", "default": False},
-                    "n_ctx": {"type": "integer", "description": "Override config n_ctx for this digest."},
-                    "max_depth": {"type": "integer", "description": "Max recursion depth (default: unlimited)."},
+                    "n_ctx": {"type": "integer", "description": "Override config n_ctx for this digest (default: auto-detected from free VRAM)."},
+                    "max_depth": {"type": "integer", "description": "Max recursion depth (default: unlimited). Use 1 for immediate children only."},
                 },
                 "required": ["path"],
             },
