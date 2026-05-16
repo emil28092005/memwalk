@@ -4,7 +4,7 @@ manifest hash for cache invalidation."""
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # Source-ish file extensions we read by default.  Override with --extensions.
@@ -54,6 +54,68 @@ class CorpusFile:
     bytes: int
     mtime_ns: int
     text: str       # file content (UTF-8, replaced on errors)
+
+
+@dataclass(slots=True)
+class SubDirInfo:
+    """Metadata about an immediate subdirectory for split-digest decisions."""
+    rel_path: str
+    abs_path: Path
+    n_files: int
+    n_chars: int
+    is_cached: bool
+    cache_n_ctx: int = 0
+
+
+def discover_subdirs(
+    root: Path,
+    *,
+    include_suffixes: frozenset[str] = DEFAULT_INCLUDE_SUFFIXES,
+    exclude_dirs: frozenset[str] = DEFAULT_EXCLUDE_DIRS,
+    exclude_patterns: tuple[str, ...] = DEFAULT_EXCLUDE_PATTERNS,
+    max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+) -> list[SubDirInfo]:
+    from . import cache as _cache
+
+    if not root.is_dir():
+        return []
+
+    results: list[SubDirInfo] = []
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name in exclude_dirs:
+            continue
+
+        files = collect_files(
+            entry,
+            include_suffixes=include_suffixes,
+            exclude_dirs=exclude_dirs,
+            exclude_patterns=exclude_patterns,
+            max_file_bytes=max_file_bytes,
+        )
+        n_chars = sum(len(f.text) for f in files)
+
+        meta = _cache.load_meta(entry)
+        is_cached = False
+        cache_n_ctx = 0
+        if meta is not None:
+            mh = manifest_hash(files)
+            if _cache.is_fresh(meta, mh):
+                is_cached = True
+                cache_n_ctx = meta.n_ctx
+
+        results.append(SubDirInfo(
+            rel_path=entry.name,
+            abs_path=entry,
+            n_files=len(files),
+            n_chars=n_chars,
+            is_cached=is_cached,
+            cache_n_ctx=cache_n_ctx,
+        ))
+
+    results.sort(key=lambda d: d.n_chars, reverse=True)
+    return results
 
 
 def collect_files(

@@ -39,6 +39,13 @@ class DigestResult:
     char_rate: float
 
 
+@dataclass(slots=True)
+class SubDirDigestResult:
+    rel_path: str
+    result: DigestResult | None
+    error: str | None = None
+
+
 # ── digest ──────────────────────────────────────────────────────
 
 def digest(
@@ -149,3 +156,34 @@ def ask(
     answer = sess.chat(_QUERY_FRAMING + question, max_tokens=max_tokens)
     meta.touch()
     return answer, meta, was_digested_now
+
+
+def digest_subdirs(
+    cfg: Config,
+    source_path: Path,
+    *,
+    n_ctx: int | None = None,
+    force: bool = False,
+    verbose: bool = False,
+) -> list[SubDirDigestResult]:
+    """Discover immediate subdirectories and digest each independently."""
+    subdirs = corpus.discover_subdirs(source_path)
+    if not subdirs:
+        return []
+
+    results: list[SubDirDigestResult] = []
+    for sub in subdirs:
+        try:
+            result = digest(cfg, sub.abs_path, n_ctx=n_ctx, force=force,
+                            verbose=verbose)
+            results.append(SubDirDigestResult(
+                rel_path=sub.rel_path,
+                result=None if result.elapsed_s == 0.0 else result,
+            ))
+        except Exception as e:
+            results.append(SubDirDigestResult(
+                rel_path=sub.rel_path,
+                result=None,
+                error=str(e),
+            ))
+    return results

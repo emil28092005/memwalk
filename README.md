@@ -28,7 +28,7 @@ model inference until you ask the next question.
 
 ## Status
 
-v0.2 — alpha. Works for the maintainer end-to-end; APIs and on-disk format
+v0.3 — alpha. Works for the maintainer end-to-end; APIs and on-disk format
 may shift.
 
 ## Install
@@ -70,6 +70,27 @@ memwalk status                                # config + cache summary
 optional. The cache is invalidated automatically when any source file
 changes (mtime / size).
 
+### Large repos: split mode
+
+When a codebase exceeds `n_ctx` (~120 K chars at default settings), use
+`--split` to digest each immediate subdirectory independently:
+
+```bash
+memwalk list-subdirs ~/Desktop/Coding/bigrepo   # see what's available
+memwalk digest ~/Desktop/Coding/bigrepo --split # per-subdir caches
+```
+
+Each subdirectory gets its own cache. The agent then targets specific
+sub-caches with `ask`:
+
+```bash
+memwalk ask ~/Desktop/Coding/bigrepo/src "How does auth work?"
+memwalk ask ~/Desktop/Coding/bigrepo/backend "What DB migrations exist?"
+```
+
+This lets the agent route questions to the relevant module without needing
+a single massive context window.
+
 ## Use from an AI agent (MCP)
 
 ```bash
@@ -77,7 +98,13 @@ memwalk mcp     # starts a stdio MCP server
 ```
 
 Tools: `digest(path)`, `ask(path, question)`, `list_caches()`,
-`drop_cache(path)`, `status()`.
+`drop_cache(path)`, `status()`, `list_subdirs(path)`, `digest_split(path)`.
+
+For large repos, the agent flow is:
+
+1. `list_subdirs(path)` — see available subdirectories and sizes
+2. `digest_split(path)` — digest each subdirectory independently
+3. `ask(subdir_path, question)` — target the relevant sub-cache
 
 ### Claude Code
 
@@ -124,10 +151,11 @@ reasoning over small snippets, a bigger code-tuned model is still better.
 ## Limits
 
 - **Single-shot context, not chunked retrieval.** Whole corpus must fit in
-  `n_ctx` (default 32 K tokens ≈ ~120 K chars). Bigger repos: bump `n_ctx`,
-  use a beefier GPU, or filter `INCLUDE_SUFFIXES` in `corpus.py`.
+  `n_ctx` (default 32 K tokens ≈ ~120 K chars). For bigger repos, use
+  `digest --split` to create per-subdirectory caches — the agent routes
+  questions to the relevant sub-cache.
 - **No code-aware filtering yet** — every text file under the root is
-  read. Use `.gitignore`-style filtering in v0.3.
+  read. `.gitignore`-style filtering planned for v0.4.
 - **No GPU-less mode tested** — should work on CPU but slow.
 
 ## License

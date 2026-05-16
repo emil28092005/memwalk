@@ -21,10 +21,11 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from . import __version__, cache
+from . import __version__, cache, corpus
 from .config import CONFIG_PATH, load_config
 from .engine import ask as engine_ask
 from .engine import digest as engine_digest
+from .engine import digest_subdirs as engine_digest_subdirs
 
 _server = Server("memwalk")
 
@@ -113,6 +114,41 @@ async def list_tools() -> list[Tool]:
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
+        Tool(
+            name="list_subdirs",
+            description=(
+                "List immediate subdirectories of a codebase root with file counts, "
+                "estimated char sizes, and cache status. Use this before digest_split "
+                "to see which subdirectories are available and which are already cached. "
+                "Cheap — does not load the model."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Codebase root to inspect."},
+                },
+                "required": ["path"],
+            },
+        ),
+        Tool(
+            name="digest_split",
+            description=(
+                "Discover immediate subdirectories under the given path and digest "
+                "each independently into its own cached SSM state. Each subdirectory "
+                "gets a separate cache, so subsequent ask() calls can target specific "
+                "sub-caches. Use list_subdirs first to see what will be digested. "
+                "Slow first time; cache is reused on subsequent calls."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Codebase root to split-digest."},
+                    "force": {"type": "boolean", "description": "Re-ingest even if cache is fresh.", "default": False},
+                    "n_ctx": {"type": "integer", "description": "Override config n_ctx for this digest."},
+                },
+                "required": ["path"],
+            },
+        ),
     ]
 
 
@@ -192,6 +228,44 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             "cache_count":  len(entries),
         }
         return [TextContent(type="text", text=json.dumps(info, indent=2))]
+
+    if name == "list_subdirs":
+        source = Path(arguments["path"]).expanduser().resolve()
+        subdirs = await asyncio.to_thread(corpus.discover_subdirs, source)
+        out = [
+            {
+                "rel_path":     d.rel_path,
+                "n_files":      d.n_files,
+                "n_chars":      d.n_chars,
+                "is_cached":    d.is_cached,
+                "cache_n_ctx":  d.cache_n_ctx,
+            }
+            for d in subdirs
+        ]
+        return [TextContent(type="text", text=json.dumps(out, indent=2))]
+
+    if name == "digest_split":
+        cfg = load_config()
+        source = Path(arguments["path"]).expanduser().resolve()
+        results = await asyncio.to_thread(
+            engine_digest_subdirs, cfg, source,
+            n_ctx=arguments.get("n_ctx"),
+            force=arguments.get("force", False),
+        )
+        out = []
+        for r in results:
+            entry: dict[str, object] = {"rel_path": r.rel_path}
+            if r.error:
+                entry["error"] = r.error
+            elif r.result is None:
+                entry["status"] = "cache_fresh"
+            else:
+                entry["status"] = "digested"
+                entry["n_files"] = r.result.meta.n_files
+                entry["n_chars"] = r.result.meta.n_chars
+                entry["elapsed_s"] = r.result.elapsed_s
+            out.append(entry)
+        return [TextContent(type="text", text=json.dumps(out, indent=2))]
 
     return [TextContent(type="text", text=f"unknown tool: {name}")]
 

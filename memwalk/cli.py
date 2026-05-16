@@ -10,13 +10,14 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
 
-from . import __version__, cache
+from . import __version__, cache, corpus
 from .config import (
     CONFIG_PATH, DEFAULT_MODEL_HINT, Config,
     load_config, write_config,
 )
 from .engine import ask as engine_ask
 from .engine import digest as engine_digest
+from .engine import digest_subdirs as engine_digest_subdirs
 
 cli     = typer.Typer(
     name="memwalk",
@@ -68,11 +69,34 @@ def digest(
                               help="Override config n_ctx for this digest"),
     force: bool = typer.Option(False, "--force", "-f",
                                help="Re-ingest even if a fresh cache exists"),
+    split: bool = typer.Option(False, "--split", "-s",
+                               help="Digest each immediate subdirectory independently"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Read all source files under PATH, build cached SSM state."""
     cfg = load_config()
     source = Path(path).expanduser().resolve()
+
+    if split:
+        with console.status(f"Discovering subdirectories in {source}…"):
+            results = engine_digest_subdirs(cfg, source, n_ctx=n_ctx,
+                                            force=force, verbose=verbose)
+        if not results:
+            console.print("[yellow]No digestable subdirectories found.[/yellow]")
+            return
+        for r in results:
+            if r.error:
+                console.print(f"[red]✗ {r.rel_path}: {r.error}[/red]")
+            elif r.result is None:
+                console.print(f"[dim]  {r.rel_path}: cache fresh[/dim]")
+            else:
+                m = r.result.meta
+                console.print(
+                    f"[green]✓[/green] {r.rel_path}: {m.n_files} files, "
+                    f"{m.n_chars:,} chars in {r.result.elapsed_s:.1f}s"
+                )
+        return
+
     with console.status(f"Digesting {source}…"):
         result = engine_digest(cfg, source, n_ctx=n_ctx, force=force,
                                verbose=verbose)
@@ -143,6 +167,34 @@ def list_caches() -> None:
             f"{m.n_chars:,}",
             f"{m.n_ctx:,}",
             ts,
+        )
+    console.print(table)
+
+
+# ── list-subdirs ─────────────────────────────────────────────────
+
+@cli.command("list-subdirs")
+def list_subdirs(
+    path: str = typer.Argument(..., help="Codebase root to inspect"),
+) -> None:
+    """Show immediate subdirectories with sizes and cache status."""
+    source = Path(path).expanduser().resolve()
+    subdirs = corpus.discover_subdirs(source)
+    if not subdirs:
+        console.print(f"[dim]No digestable subdirectories under {source}[/dim]")
+        return
+    table = Table(title=f"Subdirectories of {source.name}", show_lines=False)
+    table.add_column("Directory", style="cyan")
+    table.add_column("Files", justify="right")
+    table.add_column("Chars", justify="right")
+    table.add_column("Cache", justify="center")
+    for d in subdirs:
+        cache_status = f"[green]cached[/green] (n_ctx={d.cache_n_ctx:,})" if d.is_cached else "[dim]none[/dim]"
+        table.add_row(
+            d.rel_path,
+            f"{d.n_files}",
+            f"{d.n_chars:,}",
+            cache_status,
         )
     console.print(table)
 
