@@ -49,7 +49,7 @@ class BashConfig:
 class Config:
     model_path: Path
     n_gpu_layers: int = -1
-    n_ctx: int = 8192
+    n_ctx: int = 32768
     state_dir: Path = HOME_DIR
     git: GitConfig = field(default_factory=GitConfig)
     bash: BashConfig = field(default_factory=BashConfig)
