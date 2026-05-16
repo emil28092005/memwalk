@@ -167,6 +167,22 @@ def status() -> None:
     console.print(table)
 
 
+# ── mcp ───────────────────────────────────────────────────────────
+
+@cli.command()
+def mcp() -> None:
+    """Run as an MCP server (stdio) for Claude Code / opencode / Hermes / etc.
+
+    The Session is loaded lazily on the first tool call that needs it, then
+    reused — so subsequent queries are fast. Configure your agent to launch
+    this command; for Claude Code add to ~/.claude/mcp_servers.json:
+
+        {"mcpServers": {"memwalk": {"command": "memwalk", "args": ["mcp"]}}}
+    """
+    from .mcp_server import main as mcp_main
+    mcp_main()
+
+
 # ── prune ─────────────────────────────────────────────────────────
 
 @cli.command()

@@ -53,6 +53,55 @@ saved to `~/.memwalk/current.memb` via memba.
 `memwalk ask` and `memwalk standup` load that state and query it.  The model
 recalls themes, projects, and trajectory across processes and reboots.
 
+## Use from an agent (MCP)
+
+memwalk ships an MCP server so Claude Code / opencode / any MCP-aware
+agent can query your memory as native tools.
+
+```bash
+memwalk mcp     # starts a stdio MCP server
+```
+
+Tools exposed: `ask(question)`, `standup()`, `status()`, `update()`.
+The Session loads lazily on the first call that needs it, then stays in
+memory — first call ~2 s, subsequent calls <500 ms.
+
+### Configure Claude Code
+
+Easiest way (Claude Code CLI):
+
+```bash
+claude mcp add memwalk -- memwalk mcp
+```
+
+Or by hand, in `~/.claude/mcp_servers.json` (path may vary by version):
+
+```json
+{
+  "mcpServers": {
+    "memwalk": {
+      "command": "memwalk",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Restart Claude Code. Tools appear as `mcp__memwalk__ask`,
+`mcp__memwalk__standup`, etc.
+
+### Configure opencode
+
+opencode uses its own MCP block in `opencode.json`:
+
+```json
+{
+  "mcpServers": {
+    "memwalk": { "command": "memwalk", "args": ["mcp"] }
+  }
+}
+```
+
 ## Layout
 
 ```
