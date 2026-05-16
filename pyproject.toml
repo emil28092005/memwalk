@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name        = "memwalk"
-version     = "0.4.0"
+version     = "0.4.1"
 description = "Ask AI about any codebase — local, cached, SSM-state-backed exploration via memba + Nemotron"
 readme      = "README.md"
 license     = { text = "MIT" }

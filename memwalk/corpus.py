@@ -58,18 +58,92 @@ class CorpusFile:
 
 @dataclass(slots=True)
 class SubDirInfo:
-    """Metadata about an immediate subdirectory for split-digest decisions."""
     rel_path: str
     abs_path: Path
     n_files: int
     n_chars: int
     is_cached: bool
+    depth: int = 0
     cache_n_ctx: int = 0
+
+
+def _scan_dir(
+    entry: Path,
+    root: Path,
+    *,
+    max_chars: int,
+    include_suffixes: frozenset[str],
+    exclude_dirs: frozenset[str],
+    exclude_patterns: tuple[str, ...],
+    max_file_bytes: int,
+    depth: int = 0,
+) -> list[SubDirInfo]:
+    from . import cache as _cache
+
+    files = collect_files(
+        entry,
+        include_suffixes=include_suffixes,
+        exclude_dirs=exclude_dirs,
+        exclude_patterns=exclude_patterns,
+        max_file_bytes=max_file_bytes,
+    )
+    n_chars = sum(len(f.text) for f in files)
+
+    meta = _cache.load_meta(entry)
+    is_cached = False
+    cache_n_ctx = 0
+    if meta is not None:
+        mh = manifest_hash(files)
+        if _cache.is_fresh(meta, mh):
+            is_cached = True
+            cache_n_ctx = meta.n_ctx
+
+    rel = entry.relative_to(root).as_posix()
+
+    if n_chars <= max_chars or is_cached:
+        return [SubDirInfo(
+            rel_path=rel,
+            abs_path=entry,
+            n_files=len(files),
+            n_chars=n_chars,
+            is_cached=is_cached,
+            depth=depth,
+            cache_n_ctx=cache_n_ctx,
+        )]
+
+    children: list[SubDirInfo] = []
+    for child in sorted(entry.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name in exclude_dirs:
+            continue
+        children.extend(_scan_dir(
+            child, root,
+            max_chars=max_chars,
+            include_suffixes=include_suffixes,
+            exclude_dirs=exclude_dirs,
+            exclude_patterns=exclude_patterns,
+            max_file_bytes=max_file_bytes,
+            depth=depth + 1,
+        ))
+
+    if not children:
+        return [SubDirInfo(
+            rel_path=rel,
+            abs_path=entry,
+            n_files=len(files),
+            n_chars=n_chars,
+            is_cached=False,
+            depth=depth,
+        )]
+
+    return children
 
 
 def discover_subdirs(
     root: Path,
     *,
+    max_chars: int = 200_000,
     include_suffixes: frozenset[str] = DEFAULT_INCLUDE_SUFFIXES,
     exclude_dirs: frozenset[str] = DEFAULT_EXCLUDE_DIRS,
     exclude_patterns: tuple[str, ...] = DEFAULT_EXCLUDE_PATTERNS,
@@ -87,31 +161,13 @@ def discover_subdirs(
         if entry.name in exclude_dirs:
             continue
 
-        files = collect_files(
-            entry,
+        results.extend(_scan_dir(
+            entry, root,
+            max_chars=max_chars,
             include_suffixes=include_suffixes,
             exclude_dirs=exclude_dirs,
             exclude_patterns=exclude_patterns,
             max_file_bytes=max_file_bytes,
-        )
-        n_chars = sum(len(f.text) for f in files)
-
-        meta = _cache.load_meta(entry)
-        is_cached = False
-        cache_n_ctx = 0
-        if meta is not None:
-            mh = manifest_hash(files)
-            if _cache.is_fresh(meta, mh):
-                is_cached = True
-                cache_n_ctx = meta.n_ctx
-
-        results.append(SubDirInfo(
-            rel_path=entry.name,
-            abs_path=entry,
-            n_files=len(files),
-            n_chars=n_chars,
-            is_cached=is_cached,
-            cache_n_ctx=cache_n_ctx,
         ))
 
     results.sort(key=lambda d: d.n_chars, reverse=True)

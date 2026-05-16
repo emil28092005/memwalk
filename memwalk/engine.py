@@ -167,13 +167,21 @@ def digest_subdirs(
     force: bool = False,
     verbose: bool = False,
 ) -> list[SubDirDigestResult]:
-    """Discover immediate subdirectories and digest each independently."""
-    subdirs = corpus.discover_subdirs(source_path)
+    n_ctx = auto_n_ctx(n_ctx if n_ctx else None)
+    max_chars = n_ctx * 3
+    subdirs = corpus.discover_subdirs(source_path, max_chars=max_chars)
     if not subdirs:
         return []
 
     results: list[SubDirDigestResult] = []
     for sub in subdirs:
+        if sub.n_chars > max_chars and not sub.is_cached:
+            results.append(SubDirDigestResult(
+                rel_path=sub.rel_path,
+                result=None,
+                error=f"Too large ({sub.n_chars:,} chars > {max_chars:,} budget)",
+            ))
+            continue
         try:
             result = digest(cfg, sub.abs_path, n_ctx=n_ctx, force=force,
                             verbose=verbose)
@@ -187,4 +195,6 @@ def digest_subdirs(
                 result=None,
                 error=str(e),
             ))
+        import gc
+        gc.collect()
     return results

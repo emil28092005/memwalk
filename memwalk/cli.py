@@ -181,24 +181,34 @@ def list_caches() -> None:
 @cli.command("list-subdirs")
 def list_subdirs(
     path: str = typer.Argument(..., help="Codebase root to inspect"),
+    n_ctx: int = typer.Option(None, "--n-ctx", help="Budget n_ctx for size check"),
 ) -> None:
-    """Show immediate subdirectories with sizes and cache status."""
+    """Show subdirectories with sizes and cache status (recursive split view)."""
+    from .gpu import auto_n_ctx
     source = Path(path).expanduser().resolve()
-    subdirs = corpus.discover_subdirs(source)
+    chosen = auto_n_ctx(n_ctx if n_ctx else None)
+    max_chars = chosen * 3
+    subdirs = corpus.discover_subdirs(source, max_chars=max_chars)
     if not subdirs:
         console.print(f"[dim]No digestable subdirectories under {source}[/dim]")
         return
-    table = Table(title=f"Subdirectories of {source.name}", show_lines=False)
+    table = Table(
+        title=f"Subdirectories of {source.name} (budget {max_chars:,} chars, n_ctx={chosen:,})",
+        show_lines=False,
+    )
     table.add_column("Directory", style="cyan")
     table.add_column("Files", justify="right")
     table.add_column("Chars", justify="right")
+    table.add_column("Depth", justify="right")
     table.add_column("Cache", justify="center")
     for d in subdirs:
+        prefix = "  " * d.depth
         cache_status = f"[green]cached[/green] (n_ctx={d.cache_n_ctx:,})" if d.is_cached else "[dim]none[/dim]"
         table.add_row(
-            d.rel_path,
+            prefix + d.rel_path,
             f"{d.n_files}",
             f"{d.n_chars:,}",
+            f"{d.depth}",
             cache_status,
         )
     console.print(table)
