@@ -70,7 +70,9 @@ def digest(
     force: bool = typer.Option(False, "--force", "-f",
                                help="Re-ingest even if a fresh cache exists"),
     split: bool = typer.Option(False, "--split", "-s",
-                               help="Digest each immediate subdirectory independently"),
+                               help="Digest subdirectories independently (recursive)"),
+    max_depth: int = typer.Option(None, "--max-depth", "-d",
+                                  help="Max recursion depth for --split (default: unlimited)"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Read all source files under PATH, build cached SSM state."""
@@ -84,8 +86,10 @@ def digest(
 
     if split:
         with console.status(f"Discovering subdirectories in {source}…"):
-            results = engine_digest_subdirs(cfg, source, n_ctx=n_ctx,
-                                            force=force, verbose=verbose)
+            results = engine_digest_subdirs(
+                cfg, source, n_ctx=n_ctx, max_depth=max_depth,
+                force=force, verbose=verbose,
+            )
         if not results:
             console.print("[yellow]No digestable subdirectories found.[/yellow]")
             return
@@ -182,18 +186,23 @@ def list_caches() -> None:
 def list_subdirs(
     path: str = typer.Argument(..., help="Codebase root to inspect"),
     n_ctx: int = typer.Option(None, "--n-ctx", help="Budget n_ctx for size check"),
+    max_depth: int = typer.Option(None, "--max-depth", "-d",
+                                  help="Max recursion depth (default: unlimited)"),
 ) -> None:
     """Show subdirectories with sizes and cache status (recursive split view)."""
     from .gpu import auto_n_ctx
     source = Path(path).expanduser().resolve()
     chosen = auto_n_ctx(n_ctx if n_ctx else None)
     max_chars = chosen * 3
-    subdirs = corpus.discover_subdirs(source, max_chars=max_chars)
+    subdirs = corpus.discover_subdirs(
+        source, max_chars=max_chars, max_depth=max_depth,
+    )
     if not subdirs:
         console.print(f"[dim]No digestable subdirectories under {source}[/dim]")
         return
+    depth_label = f"max_depth={max_depth}" if max_depth is not None else "unlimited"
     table = Table(
-        title=f"Subdirectories of {source.name} (budget {max_chars:,} chars, n_ctx={chosen:,})",
+        title=f"Subdirectories of {source.name} (budget {max_chars:,} chars, n_ctx={chosen:,}, {depth_label})",
         show_lines=False,
     )
     table.add_column("Directory", style="cyan")

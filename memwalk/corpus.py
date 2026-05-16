@@ -72,6 +72,7 @@ def _scan_dir(
     root: Path,
     *,
     max_chars: int,
+    max_depth: int | None,
     include_suffixes: frozenset[str],
     exclude_dirs: frozenset[str],
     exclude_patterns: tuple[str, ...],
@@ -100,7 +101,10 @@ def _scan_dir(
 
     rel = entry.relative_to(root).as_posix()
 
-    if n_chars <= max_chars or is_cached:
+    fits_budget = n_chars <= max_chars or is_cached
+    at_max_depth = max_depth is not None and depth >= max_depth
+
+    if fits_budget or at_max_depth:
         return [SubDirInfo(
             rel_path=rel,
             abs_path=entry,
@@ -120,6 +124,7 @@ def _scan_dir(
         children.extend(_scan_dir(
             child, root,
             max_chars=max_chars,
+            max_depth=max_depth,
             include_suffixes=include_suffixes,
             exclude_dirs=exclude_dirs,
             exclude_patterns=exclude_patterns,
@@ -144,6 +149,7 @@ def discover_subdirs(
     root: Path,
     *,
     max_chars: int = 200_000,
+    max_depth: int | None = None,
     include_suffixes: frozenset[str] = DEFAULT_INCLUDE_SUFFIXES,
     exclude_dirs: frozenset[str] = DEFAULT_EXCLUDE_DIRS,
     exclude_patterns: tuple[str, ...] = DEFAULT_EXCLUDE_PATTERNS,
@@ -164,6 +170,7 @@ def discover_subdirs(
         results.extend(_scan_dir(
             entry, root,
             max_chars=max_chars,
+            max_depth=max_depth,
             include_suffixes=include_suffixes,
             exclude_dirs=exclude_dirs,
             exclude_patterns=exclude_patterns,

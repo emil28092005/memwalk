@@ -117,15 +117,16 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="list_subdirs",
             description=(
-                "List immediate subdirectories of a codebase root with file counts, "
-                "estimated char sizes, and cache status. Use this before digest_split "
-                "to see which subdirectories are available and which are already cached. "
+                "List subdirectories of a codebase root with file counts, "
+                "estimated char sizes, depth, and cache status. Use this before "
+                "digest_split to see which subdirectories are available. "
                 "Cheap — does not load the model."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Codebase root to inspect."},
+                    "max_depth": {"type": "integer", "description": "Max recursion depth (default: unlimited)."},
                 },
                 "required": ["path"],
             },
@@ -133,9 +134,9 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="digest_split",
             description=(
-                "Discover immediate subdirectories under the given path and digest "
-                "each independently into its own cached SSM state. Each subdirectory "
-                "gets a separate cache, so subsequent ask() calls can target specific "
+                "Discover subdirectories under the given path and digest each "
+                "independently into its own cached SSM state. Each subdirectory gets "
+                "a separate cache, so subsequent ask() calls can target specific "
                 "sub-caches. Use list_subdirs first to see what will be digested. "
                 "Slow first time; cache is reused on subsequent calls."
             ),
@@ -145,6 +146,7 @@ async def list_tools() -> list[Tool]:
                     "path": {"type": "string", "description": "Codebase root to split-digest."},
                     "force": {"type": "boolean", "description": "Re-ingest even if cache is fresh.", "default": False},
                     "n_ctx": {"type": "integer", "description": "Override config n_ctx for this digest."},
+                    "max_depth": {"type": "integer", "description": "Max recursion depth (default: unlimited)."},
                 },
                 "required": ["path"],
             },
@@ -231,12 +233,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     if name == "list_subdirs":
         source = Path(arguments["path"]).expanduser().resolve()
-        subdirs = await asyncio.to_thread(corpus.discover_subdirs, source)
+        subdirs = await asyncio.to_thread(
+            corpus.discover_subdirs, source,
+            max_depth=arguments.get("max_depth"),
+        )
         out = [
             {
                 "rel_path":     d.rel_path,
                 "n_files":      d.n_files,
                 "n_chars":      d.n_chars,
+                "depth":        d.depth,
                 "is_cached":    d.is_cached,
                 "cache_n_ctx":  d.cache_n_ctx,
             }
@@ -250,6 +256,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         results = await asyncio.to_thread(
             engine_digest_subdirs, cfg, source,
             n_ctx=arguments.get("n_ctx"),
+            max_depth=arguments.get("max_depth"),
             force=arguments.get("force", False),
         )
         out = []

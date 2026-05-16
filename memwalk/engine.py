@@ -164,12 +164,15 @@ def digest_subdirs(
     source_path: Path,
     *,
     n_ctx: int | None = None,
+    max_depth: int | None = None,
     force: bool = False,
     verbose: bool = False,
 ) -> list[SubDirDigestResult]:
     n_ctx = auto_n_ctx(n_ctx if n_ctx else None)
     max_chars = n_ctx * 3
-    subdirs = corpus.discover_subdirs(source_path, max_chars=max_chars)
+    subdirs = corpus.discover_subdirs(
+        source_path, max_chars=max_chars, max_depth=max_depth,
+    )
     if not subdirs:
         return []
 

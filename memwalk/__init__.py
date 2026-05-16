@@ -1,3 +1,3 @@
 """memwalk — ask AI about any codebase via cached SSM state."""
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
