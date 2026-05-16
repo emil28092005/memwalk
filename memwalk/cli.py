@@ -1,8 +1,8 @@
-"""memwalk CLI — typer entry point."""
+"""memwalk CLI v0.2 — codebase exploration via cached SSM state."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -10,18 +10,19 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
 
-from . import __version__
+from . import __version__, cache
 from .config import (
-    DEFAULT_MODEL_HINT, HOME_DIR, BashConfig, Config, GitConfig,
-    load_config, read_last_update, write_config,
+    CONFIG_PATH, DEFAULT_MODEL_HINT, Config,
+    load_config, write_config,
 )
-from .ingest import open_session, query, update
-from .snapshot import prune_old
-from .sources import bash as bash_src
-from .sources import git as git_src
+from .engine import ask as engine_ask
+from .engine import digest as engine_digest
 
-cli     = typer.Typer(name="memwalk", help="Walk through your work memory.",
-                      add_completion=False)
+cli     = typer.Typer(
+    name="memwalk",
+    help="Ask AI about any codebase — local, cached, SSM-state-backed.",
+    add_completion=False,
+)
 console = Console()
 
 
@@ -29,170 +30,176 @@ console = Console()
 
 @cli.command()
 def init(
-    model:        str = typer.Option(None, "--model", help="Path to GGUF model"),
-    scan_path:    list[str] = typer.Option(None, "--scan",
-                                            help="Directory to scan for git repos (repeatable)"),
-    no_bash:     bool = typer.Option(False, "--no-bash", help="Disable bash history"),
-    force:       bool = typer.Option(False, "--force", "-f",
-                                      help="Overwrite existing config"),
+    model: str = typer.Option(None, "--model", help="Path to GGUF model"),
+    n_ctx: int = typer.Option(32768, "--n-ctx", help="Inference context window"),
+    gpu_layers: int = typer.Option(-1, "--gpu-layers", "-g"),
+    force: bool = typer.Option(False, "--force", "-f"),
 ) -> None:
-    """Interactive (or flag-driven) setup. Writes ~/.memwalk/config.toml."""
-    config_path = HOME_DIR / "config.toml"
-    if config_path.exists() and not force:
-        console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
-        console.print("Use --force to overwrite, or edit the file by hand.")
+    """One-time setup. Writes ~/.memwalk/config.toml."""
+    if CONFIG_PATH.exists() and not force:
+        console.print(f"[yellow]Config already exists at {CONFIG_PATH}[/yellow]")
+        console.print("Use --force to overwrite, or edit by hand.")
         raise typer.Exit(1)
 
     console.print(f"[bold cyan]memwalk init v{__version__}[/bold cyan]\n")
-
-    # Model
     if model is None:
         console.print(DEFAULT_MODEL_HINT + "\n")
         model = Prompt.ask("Path to GGUF model")
-    model_p = Path(model).expanduser()
-    if not model_p.exists():
-        console.print(f"[yellow]warning: {model_p} doesn't exist yet[/yellow]")
-
-    # Scan paths
-    if scan_path:
-        scan_paths = [Path(p).expanduser() for p in scan_path]
-    else:
-        default = str(Path.home() / "Desktop/Coding")
-        raw = Prompt.ask(
-            "Directories to scan for git repos (comma-separated)",
-            default=default,
-        )
-        scan_paths = [Path(p.strip()).expanduser() for p in raw.split(",") if p.strip()]
 
     cfg = Config(
-        model_path=model_p,
-        git=GitConfig(scan_paths=scan_paths),
-        bash=BashConfig(enabled=not no_bash),
+        model_path=Path(model).expanduser(),
+        n_gpu_layers=gpu_layers,
+        n_ctx=n_ctx,
     )
     write_config(cfg)
+    console.print(f"\n[green]✓[/green] {CONFIG_PATH}")
+    console.print(
+        f"\nNext: [bold]memwalk digest /path/to/repo[/bold] to ingest a codebase,\n"
+        f"then  [bold]memwalk ask /path/to/repo \"...\"[/bold] to query."
+    )
 
-    console.print(f"\n[green]✓[/green] Wrote {cfg.config_path}")
-    console.print(f"[green]✓[/green] State dir: {cfg.state_dir}")
-    console.print(f"\nNext: [bold]memwalk update[/bold]  to ingest the last 30 days")
 
+# ── digest ────────────────────────────────────────────────────────
 
-# ── update ────────────────────────────────────────────────────────
-
-@cli.command(name="update")
-def update_cmd(
+@cli.command()
+def digest(
+    path: str = typer.Argument(..., help="Codebase root to ingest"),
+    n_ctx: int = typer.Option(None, "--n-ctx",
+                              help="Override config n_ctx for this digest"),
+    force: bool = typer.Option(False, "--force", "-f",
+                               help="Re-ingest even if a fresh cache exists"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Ingest new git+bash events since last update."""
+    """Read all source files under PATH, build cached SSM state."""
     cfg = load_config()
-    with console.status("Ingesting…"):
-        result = update(cfg, verbose=verbose)
-
-    if result["ingested"] == 0:
-        console.print(f"[dim]No new activity since {result['since'].strftime('%Y-%m-%d %H:%M')}[/dim]")
+    source = Path(path).expanduser().resolve()
+    with console.status(f"Digesting {source}…"):
+        result = engine_digest(cfg, source, n_ctx=n_ctx, force=force,
+                               verbose=verbose)
+    m = result.meta
+    if result.elapsed_s == 0.0:
+        console.print(f"[dim]Cache hit — already fresh ({m.n_files} files, "
+                      f"{m.n_chars:,} chars).[/dim]")
         return
-
     console.print(
-        f"[green]✓[/green] Ingested {result['ingested']} events "
-        f"([cyan]{result['git']}[/cyan] commits + "
-        f"[cyan]{result['bash']}[/cyan] shell sessions) "
-        f"in {result['elapsed_s']:.1f}s"
+        f"[green]✓[/green] Digested {m.n_files} files, {m.n_chars:,} chars "
+        f"in {result.elapsed_s:.1f}s ({result.char_rate:,.0f} char/s)"
     )
-    console.print(f"  Window: {result['since'].strftime('%Y-%m-%d %H:%M')} → "
-                  f"{result['until'].strftime('%Y-%m-%d %H:%M')}")
-    console.print(f"  State : {result['state_size']:,} bytes"
-                  + ("  (daily snapshot taken)" if result["snapshotted"] else ""))
+    console.print(f"  cache  : [dim]{m.state_path}[/dim]")
+    ack = result.ack
+    console.print(f"  model  : {ack[:140]}{'…' if len(ack) > 140 else ''}")
 
 
 # ── ask ───────────────────────────────────────────────────────────
 
 @cli.command()
 def ask(
-    question: str = typer.Argument(..., help="What to ask the model"),
+    path: str = typer.Argument(..., help="Codebase root (digest first or auto)"),
+    question: str = typer.Argument(..., help="Natural-language question"),
     max_tokens: int = typer.Option(400, "--max-tokens"),
+    no_auto_digest: bool = typer.Option(False, "--no-auto-digest",
+                                        help="Fail instead of digesting if cache missing"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Query the current state."""
+    """Query the cached codebase. Auto-digests if no cache exists."""
     cfg = load_config()
+    source = Path(path).expanduser().resolve()
     with console.status("Thinking…"):
-        answer = query(cfg, question, max_tokens=max_tokens, verbose=verbose)
+        answer, meta, just_digested = engine_ask(
+            cfg, source, question,
+            max_tokens=max_tokens,
+            auto_digest=not no_auto_digest,
+            verbose=verbose,
+        )
+    if just_digested:
+        console.print(f"[dim](digested {meta.n_files} files / "
+                      f"{meta.n_chars:,} chars on demand)[/dim]\n")
     console.print(answer)
 
 
-# ── standup ───────────────────────────────────────────────────────
+# ── list ──────────────────────────────────────────────────────────
+
+@cli.command("list")
+def list_caches() -> None:
+    """Show all cached codebases."""
+    entries = cache.list_all()
+    if not entries:
+        console.print(f"[dim]No cached codebases yet. Try `memwalk digest <path>`.[/dim]")
+        return
+    table = Table(title="Cached codebases", show_lines=False)
+    table.add_column("Source", style="cyan", overflow="fold")
+    table.add_column("Files", justify="right")
+    table.add_column("Chars", justify="right")
+    table.add_column("n_ctx", justify="right")
+    table.add_column("Last used")
+    for m in entries:
+        try:
+            ts = datetime.fromisoformat(m.last_used_iso).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            ts = m.last_used_iso
+        table.add_row(
+            m.source_path,
+            f"{m.n_files}",
+            f"{m.n_chars:,}",
+            f"{m.n_ctx:,}",
+            ts,
+        )
+    console.print(table)
+
+
+# ── drop ──────────────────────────────────────────────────────────
 
 @cli.command()
-def standup(
-    verbose: bool = typer.Option(False, "--verbose", "-v"),
+def drop(
+    path: str = typer.Argument(..., help="Source dir whose cache to invalidate"),
+    yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    """Generate a brief 'what I did + what's next' summary from recent activity."""
-    cfg = load_config()
-    q = (
-        "Generate my daily standup notes. Cover: what I worked on yesterday "
-        "(grouped by project), what I plan today based on the trajectory, and "
-        "any blockers visible in the activity. Be concise — bullet points, "
-        "no preamble."
-    )
-    with console.status("Thinking…"):
-        answer = query(cfg, q, max_tokens=500, verbose=verbose)
-    console.print("[bold cyan]Standup:[/bold cyan]\n")
-    console.print(answer)
+    """Invalidate cache for a codebase."""
+    source = Path(path).expanduser().resolve()
+    meta = cache.load_meta(source)
+    if meta is None:
+        console.print(f"[dim]No cache for {source}[/dim]")
+        return
+    if not yes and not typer.confirm(
+        f"Drop cache for {meta.source_path} ({meta.n_files} files, "
+        f"{meta.n_chars:,} chars)?"
+    ):
+        raise typer.Abort()
+    deleted = cache.drop(source)
+    console.print(f"[dim]{'Dropped' if deleted else 'Nothing to drop'}: {source}[/dim]")
 
 
 # ── status ────────────────────────────────────────────────────────
 
 @cli.command()
 def status() -> None:
-    """Show config and state info."""
+    """Show config and cache summary."""
     try:
         cfg = load_config()
     except FileNotFoundError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
 
-    last = read_last_update(cfg)
+    entries = cache.list_all()
     table = Table(show_header=False, box=None)
-    table.add_row("[bold]config[/bold]",          str(cfg.config_path))
-    table.add_row("[bold]model[/bold]",           str(cfg.model_path))
-    table.add_row("[bold]state[/bold]",
-                  f"{cfg.state_path}  ({cfg.state_path.stat().st_size:,} B)"
-                  if cfg.state_path.exists() else f"{cfg.state_path}  (none)")
-    table.add_row("[bold]scan paths[/bold]",      ", ".join(str(p) for p in cfg.git.scan_paths))
-    table.add_row("[bold]bash[/bold]",            "on" if cfg.bash.enabled else "off")
-    table.add_row("[bold]last update[/bold]",
-                  last.strftime("%Y-%m-%d %H:%M") if last else "never")
-    if cfg.snapshots_dir.exists():
-        snaps = sorted(cfg.snapshots_dir.glob("*.memb"))
-        table.add_row("[bold]snapshots[/bold]",
-                      f"{len(snaps)} " + (f"(latest {snaps[-1].stem})" if snaps else ""))
+    table.add_row("[bold]config[/bold]",   str(CONFIG_PATH))
+    table.add_row("[bold]model[/bold]",    str(cfg.model_path))
+    table.add_row("[bold]n_ctx[/bold]",    f"{cfg.n_ctx:,}")
+    table.add_row("[bold]gpu_layers[/bold]", str(cfg.n_gpu_layers))
+    table.add_row("[bold]caches[/bold]",   f"{len(entries)} codebase(s)")
     console.print(table)
+    if entries:
+        console.print()
+        list_caches()
 
 
 # ── mcp ───────────────────────────────────────────────────────────
 
 @cli.command()
 def mcp() -> None:
-    """Run as an MCP server (stdio) for Claude Code / opencode / Hermes / etc.
-
-    The Session is loaded lazily on the first tool call that needs it, then
-    reused — so subsequent queries are fast. Configure your agent to launch
-    this command; for Claude Code add to ~/.claude/mcp_servers.json:
-
-        {"mcpServers": {"memwalk": {"command": "memwalk", "args": ["mcp"]}}}
-    """
+    """Run as an MCP server for Claude Code / opencode / Hermes / etc."""
     from .mcp_server import main as mcp_main
     mcp_main()
-
-
-# ── prune ─────────────────────────────────────────────────────────
-
-@cli.command()
-def prune(
-    keep_days: int = typer.Option(90, "--keep-days", help="Snapshots older than this are deleted"),
-) -> None:
-    """Delete old daily snapshots."""
-    cfg = load_config()
-    n = prune_old(cfg, keep_days=keep_days)
-    console.print(f"[dim]Deleted {n} snapshots older than {keep_days} days[/dim]")
 
 
 def main() -> None:

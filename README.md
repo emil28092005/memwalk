@@ -1,31 +1,52 @@
 # memwalk
 
-> Walk through your work memory.
+> Ask AI about any codebase — local, cached, SSM-state-backed.
 
-A local-first CLI that watches your git activity (and optionally your shell
-history) and feeds it into a Mamba-based LLM via persistent state.  You can
-then ask in plain English what you were doing last week, why you started that
-branch, or generate a standup from yesterday's commits — without your data
-ever leaving the machine.
+`memwalk` reads an entire codebase into a Mamba-based LLM via persistent
+state, so subsequent questions answer in <1 s without re-reading anything.
+The state is byte-portable (via [memba](https://github.com/emil28092005/Memba))
+and cached per-directory by file manifest hash, so re-asking is free until
+the source changes.
 
-Built on **[memba](https://github.com/emil28092005/Memba)** for state
-persistence and **[NVIDIA Nemotron-3-Nano-4B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF)**
-(or any other GGUF SSM/hybrid model) for inference.
+Built on **memba** for state persistence and
+**[NVIDIA Nemotron-3-Nano-4B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF)**
+(hybrid Mamba-2 + Transformer, 1M training context) for inference.
+
+## What makes this different from Cursor / Cody / Aider
+
+| Tool         | Approach                       | Whole-repo question      |
+|--------------|--------------------------------|--------------------------|
+| Cursor       | Embed chunks, retrieve at Q    | Fragmented context       |
+| Cody         | BM25 + dense embeddings (RAG)  | Pre-indexed, retrieved   |
+| Aider        | Symbol-level repo map          | Signatures only          |
+| **memwalk**  | **Read everything once, cache the SSM state** | Holistic answer; <1s re-asks |
+
+SSM state is **fixed-size** (Mamba's defining property), so even a 1M-token
+codebase compresses into a constant-size file (~85 MB at our settings).
+Reload is millisecond-scale — re-asking a freshly-cached repo costs no
+model inference until you ask the next question.
 
 ## Status
 
-v0.1 — alpha.  Works end-to-end on Linux for the maintainer; APIs and on-disk
-format may change.
+v0.2 — alpha. Works for the maintainer end-to-end; APIs and on-disk format
+may shift.
 
 ## Install
 
+memba is not on PyPI yet, so install via git:
+
 ```bash
-# Until memba is on PyPI, install both editable from local clones:
-pip install -e /path/to/Memba
-pip install -e /path/to/memwalk
+pip install git+https://github.com/emil28092005/memwalk.git
+# (pulls memba @ main as a transitive git dep)
 ```
 
-Make sure you have a GGUF Mamba-2 or hybrid model.  Recommended:
+Or from a local clone:
+
+```bash
+pip install -e ~/Desktop/Coding/memwalk
+```
+
+Make sure you have a GGUF Mamba-2 / hybrid model. Recommended:
 
 ```bash
 hf download nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF \
@@ -36,63 +57,35 @@ hf download nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF \
 ## Quickstart
 
 ```bash
-memwalk init                                  # interactive setup
-memwalk update                                # ingest last 30 days of git+bash
-memwalk standup                               # auto-generate daily standup
-memwalk ask "What was I working on last week?"
-memwalk status
+memwalk init                                  # one-time: set model path
+memwalk digest ~/Desktop/Coding/myrepo        # first time: read everything (~10s)
+memwalk ask    ~/Desktop/Coding/myrepo "How does auth work?"   # <1s
+memwalk ask    ~/Desktop/Coding/myrepo "Which file owns the migration logic?"
+memwalk list                                  # show all cached codebases
+memwalk drop   ~/Desktop/Coding/myrepo        # invalidate cache
+memwalk status                                # config + cache summary
 ```
 
-## What it actually does
+`memwalk ask` auto-digests on first use, so the explicit `digest` step is
+optional. The cache is invalidated automatically when any source file
+changes (mtime / size).
 
-`memwalk update` walks your configured git repos and (optionally) your bash
-history, formats new events into a readable activity block, and feeds that
-into the SSM model.  The model's hidden state — a fixed ~85 MB blob — is
-saved to `~/.memwalk/current.memb` via memba.
-
-`memwalk ask` and `memwalk standup` load that state and query it.  The model
-recalls themes, projects, and trajectory across processes and reboots.
-
-## Use from an agent (MCP)
-
-memwalk ships an MCP server so Claude Code / opencode / any MCP-aware
-agent can query your memory as native tools.
+## Use from an AI agent (MCP)
 
 ```bash
 memwalk mcp     # starts a stdio MCP server
 ```
 
-Tools exposed: `ask(question)`, `standup()`, `status()`, `update()`.
-The Session loads lazily on the first call that needs it, then stays in
-memory — first call ~2 s, subsequent calls <500 ms.
+Tools: `digest(path)`, `ask(path, question)`, `list_caches()`,
+`drop_cache(path)`, `status()`.
 
-### Configure Claude Code
-
-Easiest way (Claude Code CLI):
+### Claude Code
 
 ```bash
 claude mcp add memwalk -- memwalk mcp
 ```
 
-Or by hand, in `~/.claude/mcp_servers.json` (path may vary by version):
-
-```json
-{
-  "mcpServers": {
-    "memwalk": {
-      "command": "memwalk",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-Restart Claude Code. Tools appear as `mcp__memwalk__ask`,
-`mcp__memwalk__standup`, etc.
-
-### Configure opencode
-
-opencode uses its own MCP block in `opencode.json`:
+Or by hand in your MCP config:
 
 ```json
 {
@@ -102,16 +95,40 @@ opencode uses its own MCP block in `opencode.json`:
 }
 ```
 
-## Layout
+### opencode / Hermes / other MCP clients
 
-```
-~/.memwalk/
-├── config.toml
-├── current.memb              ← rolling state
-├── last_update.txt
-└── snapshots/
-    └── 2026-05-16.memb       ← daily snapshot before each update
-```
+Same shape — they all consume `{"command": "memwalk", "args": ["mcp"]}`.
+
+After the agent connects it sees `mcp__memwalk__digest`,
+`mcp__memwalk__ask`, etc. Typical flow:
+
+> User: *"What changed in the migrations folder of my CU\_Points repo this month?"*
+>
+> Agent: calls `mcp__memwalk__ask(path="~/Desktop/Coding/AI/CU_Points",
+> question="...")`. memwalk auto-digests if needed, returns answer.
+
+## What does it actually do well?
+
+Validated on memba's own codebase (13 files, ~63 K chars):
+
+- Listed every header field of the state file format **in order**
+- Explained the architectural reason for the `eval+sample` rewrite
+- Identified which side of the C/Python boundary writes the MEMB trailer
+- Listed all CLI subcommands accurately
+- Suggested correct file path + approach for adding a new command
+
+Recall is **descriptive-strong** — facts that are in the source. It is not
+a substitute for a real debugger or a code generator. For complex
+reasoning over small snippets, a bigger code-tuned model is still better.
+
+## Limits
+
+- **Single-shot context, not chunked retrieval.** Whole corpus must fit in
+  `n_ctx` (default 32 K tokens ≈ ~120 K chars). Bigger repos: bump `n_ctx`,
+  use a beefier GPU, or filter `INCLUDE_SUFFIXES` in `corpus.py`.
+- **No code-aware filtering yet** — every text file under the root is
+  read. Use `.gitignore`-style filtering in v0.3.
+- **No GPU-less mode tested** — should work on CPU but slow.
 
 ## License
 

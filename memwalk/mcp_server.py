@@ -1,55 +1,32 @@
 """
-MCP server — exposes memwalk as tools for Claude Code / opencode / any
-MCP-aware agent. Runs over stdio.
+MCP server (stdio) — exposes memwalk as tools for Claude Code / opencode /
+Hermes / any MCP-aware agent.
 
 Tools:
-    ask(question)   — query the current memwalk state, returns the answer text
-    standup()       — generate standup notes from accumulated activity
-    status()        — config + state metadata (no model load required)
-    update()        — refresh state from git/bash (slow, on demand)
-
-Lifetime model: the underlying memba Session is loaded lazily on the first
-tool call that needs it, then reused for the rest of the process — so the
-first query pays ~2s of model+state load, subsequent queries are <500ms.
+    digest(path)              — ingest a codebase into cached SSM state
+    ask(path, question)       — query a codebase (auto-digests if needed)
+    list_caches()             — show all cached codebases
+    drop_cache(path)          — invalidate a cache
+    status()                  — config + cache summary
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from . import __version__
-from .config import load_config, read_last_update
-from .ingest import open_session, update as run_update
+from . import __version__, cache
+from .config import CONFIG_PATH, load_config
+from .engine import ask as engine_ask
+from .engine import digest as engine_digest
 
 _server = Server("memwalk")
-
-# Singleton session — created on first call that needs it
-_session = None
-_QUERY_FRAMING = (
-    "Drawing on the work activity I shared with you earlier, please answer "
-    "this clearly and concretely:\n\n"
-)
-
-
-def _get_session():
-    """Lazy-load (or reload) the memba Session."""
-    global _session
-    if _session is None:
-        cfg = load_config()
-        _session = open_session(cfg)
-    return _session
-
-
-def _reset_session() -> None:
-    """Drop the cached session — used after `update` so next query sees fresh state."""
-    global _session
-    _session = None
 
 
 # ── Tool declarations ────────────────────────────────────────────
@@ -58,54 +35,81 @@ def _reset_session() -> None:
 async def list_tools() -> list[Tool]:
     return [
         Tool(
-            name="ask",
+            name="digest",
             description=(
-                "Query the user's accumulated work memory. Returns the model's "
-                "natural-language answer based on git commits and shell activity "
-                "previously ingested by memwalk. Use for questions like "
-                "'what was I working on last week?', 'which project saw the most "
-                "activity?', 'when did I start branch X?'."
+                "Read all source files under the given directory and build a "
+                "cached SSM state that can be queried in subsequent ask() calls. "
+                "Slow first time (5-30s for medium repos, longer for big ones); "
+                "cache is reused on subsequent calls until source files change. "
+                "Use before ask() to control when ingestion happens, or just call "
+                "ask() directly which will auto-digest as needed."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "question": {
+                    "path": {
                         "type": "string",
-                        "description": "Natural-language question about the user's recent work.",
+                        "description": "Absolute path to the codebase root.",
                     },
-                    "max_tokens": {
+                    "force": {
+                        "type": "boolean",
+                        "description": "Re-ingest even if cache is fresh.",
+                        "default": False,
+                    },
+                    "n_ctx": {
                         "type": "integer",
-                        "description": "Maximum tokens to generate (default 400).",
-                        "default": 400,
+                        "description": "Override config n_ctx for this digest.",
                     },
                 },
-                "required": ["question"],
+                "required": ["path"],
             },
         ),
         Tool(
-            name="standup",
+            name="ask",
             description=(
-                "Generate concise daily-standup notes from the user's recent "
-                "activity: what they did yesterday (grouped by project), planned "
-                "next steps, and any blockers visible in commit messages."
+                "Query a codebase using its cached SSM state. Returns the "
+                "model's answer based on the previously digested source. "
+                "Auto-digests if no fresh cache exists (first call may be "
+                "slow). Subsequent calls on the same codebase are fast "
+                "(<1s typical). Best for descriptive questions: 'what does "
+                "module X do', 'where is concept Y used', 'list all CLI "
+                "commands', 'how would I add feature Z'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path":     {"type": "string"},
+                    "question": {"type": "string"},
+                    "max_tokens": {"type": "integer", "default": 400},
+                },
+                "required": ["path", "question"],
+            },
+        ),
+        Tool(
+            name="list_caches",
+            description=(
+                "Return all cached codebases as JSON: source path, file count, "
+                "char count, n_ctx, and last-used timestamp. Cheap — does not "
+                "load the model."
             ),
             inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="drop_cache",
+            description=(
+                "Invalidate the cached state for the given codebase path. Next "
+                "ask() on that path will trigger a fresh digest."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
         ),
         Tool(
             name="status",
             description=(
-                "Return memwalk configuration and state metadata as JSON. "
-                "Cheap — does not load the model. Useful for sanity-checking "
-                "whether memwalk has up-to-date data."
-            ),
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        Tool(
-            name="update",
-            description=(
-                "Ingest new git+bash activity into the state. Slow (a few seconds — "
-                "loads the model). Call only when the user explicitly asks for a "
-                "refresh, or when status() shows the last update is stale."
+                "Return memwalk config and cache summary as JSON. No model load."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
@@ -116,58 +120,78 @@ async def list_tools() -> list[Tool]:
 
 @_server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+    if name == "digest":
+        cfg = load_config()
+        source = Path(arguments["path"]).expanduser().resolve()
+        result = await asyncio.to_thread(
+            engine_digest, cfg, source,
+            n_ctx=arguments.get("n_ctx"),
+            force=arguments.get("force", False),
+        )
+        payload = {
+            "source_path": result.meta.source_path,
+            "key":         result.meta.key,
+            "n_files":     result.meta.n_files,
+            "n_chars":     result.meta.n_chars,
+            "n_ctx":       result.meta.n_ctx,
+            "elapsed_s":   result.elapsed_s,
+            "cache_hit":   result.elapsed_s == 0.0,
+            "model_ack":   result.ack,
+        }
+        return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+
     if name == "ask":
+        cfg = load_config()
+        source = Path(arguments["path"]).expanduser().resolve()
         question = arguments.get("question", "").strip()
         if not question:
             return [TextContent(type="text", text="error: question is required")]
-        sess = await asyncio.to_thread(_get_session)
-        answer = await asyncio.to_thread(
-            sess.chat,
-            _QUERY_FRAMING + question,
-            arguments.get("max_tokens", 400),
+        answer, meta, just_digested = await asyncio.to_thread(
+            engine_ask, cfg, source, question,
+            max_tokens=arguments.get("max_tokens", 400),
+            auto_digest=True,
         )
-        return [TextContent(type="text", text=answer)]
+        prefix = "(digested on demand) " if just_digested else ""
+        return [TextContent(type="text", text=prefix + answer)]
 
-    if name == "standup":
-        sess = await asyncio.to_thread(_get_session)
-        standup_q = (
-            "Generate my daily standup notes. Cover: what I worked on yesterday "
-            "(grouped by project), what I plan today based on the trajectory, and "
-            "any blockers visible in the activity. Be concise — bullet points, "
-            "no preamble."
-        )
-        answer = await asyncio.to_thread(
-            sess.chat, _QUERY_FRAMING + standup_q, 500
-        )
-        return [TextContent(type="text", text=answer)]
+    if name == "list_caches":
+        entries = cache.list_all()
+        out = [
+            {
+                "source_path":  m.source_path,
+                "key":          m.key,
+                "n_files":      m.n_files,
+                "n_chars":      m.n_chars,
+                "n_ctx":        m.n_ctx,
+                "model_path":   m.model_path,
+                "created":      m.created_iso,
+                "last_used":    m.last_used_iso,
+            }
+            for m in entries
+        ]
+        return [TextContent(type="text", text=json.dumps(out, indent=2))]
+
+    if name == "drop_cache":
+        source = Path(arguments["path"]).expanduser().resolve()
+        deleted = await asyncio.to_thread(cache.drop, source)
+        return [TextContent(type="text",
+                            text=f"{'dropped' if deleted else 'no cache for'}: {source}")]
 
     if name == "status":
-        cfg = load_config()
-        last = read_last_update(cfg)
+        try:
+            cfg = load_config()
+        except FileNotFoundError as e:
+            return [TextContent(type="text", text=f"not configured: {e}")]
+        entries = cache.list_all()
         info = {
             "version":      __version__,
+            "config_path":  str(CONFIG_PATH),
             "model_path":   str(cfg.model_path),
-            "state_file":   str(cfg.state_path),
-            "state_bytes":  cfg.state_path.stat().st_size if cfg.state_path.exists() else 0,
-            "last_update":  last.isoformat() if last else None,
-            "scan_paths":   [str(p) for p in cfg.git.scan_paths],
-            "bash_enabled": cfg.bash.enabled,
+            "n_ctx":        cfg.n_ctx,
+            "n_gpu_layers": cfg.n_gpu_layers,
+            "cache_count":  len(entries),
         }
         return [TextContent(type="text", text=json.dumps(info, indent=2))]
-
-    if name == "update":
-        cfg = load_config()
-        result = await asyncio.to_thread(run_update, cfg)
-        _reset_session()  # next ask/standup sees the freshly written state
-        summary = (
-            f"Ingested {result['ingested']} events "
-            f"({result['git']} commits + {result['bash']} shell sessions) "
-            f"in {result['elapsed_s']:.1f}s. "
-            f"State now {result['state_size']:,} bytes."
-        ) if result["ingested"] else (
-            f"No new activity since {result['since'].strftime('%Y-%m-%d %H:%M')}."
-        )
-        return [TextContent(type="text", text=summary)]
 
     return [TextContent(type="text", text=f"unknown tool: {name}")]
 

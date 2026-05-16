@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name        = "memwalk"
-version     = "0.1.0"
-description = "Walk through your work memory — semantic recall of git, shell and notes via local SSM models"
+version     = "0.2.0"
+description = "Ask AI about any codebase — local, cached, SSM-state-backed exploration via memba + Nemotron"
 readme      = "README.md"
 license     = { text = "MIT" }
 requires-python = ">=3.10"
 
-keywords = ["llm", "memory", "ssm", "mamba", "nemotron", "memba", "personal-ai", "cli"]
+keywords = ["llm", "ssm", "mamba", "nemotron", "memba", "code-search", "mcp", "cli"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -24,7 +24,10 @@ classifiers = [
 ]
 
 dependencies = [
-    "memba>=0.1.0",
+    # memba is not on PyPI yet — install from github.
+    # When memba ships to PyPI this becomes `memba>=0.2.0` and memwalk
+    # can itself be published.
+    "memba @ git+https://github.com/emil28092005/Memba.git@main",
     "typer>=0.9.0",
     "rich>=13.0.0",
     "mcp>=1.0.0",
